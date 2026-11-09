@@ -1,0 +1,30 @@
+# MATLAB / Simulink
+*.asv
+*.autosave
+*.slxc
+*.mex*
+slprj/
+codegen/
+sccprj/
+*.slx.r20*
+*.mdl.r20*
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# ROS 2 build output
+ros2_ws/build/
+ros2_ws/install/
+ros2_ws/log/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Office temporary files
+~$*
