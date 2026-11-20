@@ -1,0 +1,172 @@
+% object_identification.m
+% Finds the pale green rectangular test piece in a video.
+%
+% Measured   -> each pixel's colour, converted to HSV
+% Extracted  -> mask of pale green pixels, the largest blob,
+%               and the 4-corner shape (quadrilateral) that best fits
+% Identified -> blob is solid, fits a 4-corner shape well, and its corner
+%               angles are plausible for a rectangle seen in perspective
+%
+% Colouring Key for test pieces:
+%   yellow outline = "Test piece partially out of view" (right colour and size);
+%                    text on the image says which way to move
+%   green outline  = "Test piece detected": fully in view and passes the shape checks
+%   red outline    = "Test piece rejected": right colour, but fails a shape check
+
+clear; close all;
+
+%% Settings
+videoFile = 'test_piece2.mp4';  % import video
+scale     = 0.5;                % reduce num of frames 
+
+% Setting the HSV for the desired test pieces colour (currently set for the
+% green test piece dont change pls)
+
+hueMin = 0.12;   hueMax = 0.36;  % yellow-green
+satMin = 0.08;   satMax = 0.45;  % pale colour
+valMin = 0.40;   valMax = 0.92;  % not dark, not blown-out white
+
+% Cleaning the data 
+minArea = 2000;                 % ignoring small blobs - pixels, after scaling; ignores small specks
+openR   = 5;                    % removes thin streaks joined to the blob
+closeR  = 7;                    % closes gaps, e.g. across the writing
+
+% Shape checks (a rectangle seen at an angle is a 4-corner shape, not a perfect rectangle)
+minSolidity = 0.75;             % blob area : solid, not ragged
+minQuadFit  = 0.80;             % 4-corner shape area : close to 4-sided
+minAngle    = 30;                
+maxAngle    = 150;% corner angles must lie between these degrees ( cause the 
+%                                 test piece is a rectangle but will need to 
+%                                 changet if we decide to make it more blade like (curves no edges) issue for a later date
+
+%% Find the video
+if ~isfile(videoFile)
+    [f, p] = uigetfile({'*.mp4;*.mov', 'Video files'}, 'Choose the video');
+    if isequal(f, 0), error('No video chosen'); end
+    videoFile = fullfile(p, f);
+end
+
+%% Process the video
+v = VideoReader(videoFile);
+figure('Name', 'Object identification');
+
+while hasFrame(v)
+    frame = imresize(readFrame(v), scale);
+    hsv   = rgb2hsv(frame);
+    H = hsv(:,:,1);  S = hsv(:,:,2);  V = hsv(:,:,3);
+    [rows, cols] = size(H);
+
+    % 1. Measured -> mask of pale green pixels
+    mask = H > hueMin & H < hueMax & ...
+           S > satMin & S < satMax & ...
+           V > valMin & V < valMax;
+    mask = bwareaopen(mask, minArea);              % remove small specks
+    mask = imopen(mask, strel('disk', openR));     % remove thin streaks
+    mask = imclose(mask, strel('disk', closeR));   % close gaps across the writing
+    mask = imfill(mask, 'holes');                  % fill holes inside the blob
+
+    % 2. Extracted -> largest blob
+    L     = bwlabel(mask);
+    stats = regionprops(L, 'Area', 'Solidity', 'ConvexHull');
+
+    imshow(frame); hold on;
+
+    if isempty(stats)
+        title('No test piece in view');
+        hold off; drawnow; continue
+    end
+
+    [~, k] = max([stats.Area]);                    % keep the largest blob
+    s      = stats(k);
+    blob   = (L == k);
+
+    % checking which edges of the image does the blob touch? Then it's only partly
+    % in view. to decide how the drone needs to move
+    touch.left   = any(blob(:, 1));
+    touch.right  = any(blob(:, end));
+    touch.top    = any(blob(1, :));
+    touch.bottom = any(blob(end, :));
+    partlyInView = touch.left || touch.right || touch.top || touch.bottom;
+
+    if partlyInView
+        % Potentially the test piece: yellow outline, and which way to move
+        visboundaries(blob, 'Color', 'y', 'LineWidth', 3);
+        msg = moveDirection(touch);
+        text(cols/2, 20, msg, 'Color', 'y', 'FontSize', 16, 'FontWeight', 'bold', ...
+             'HorizontalAlignment', 'center', 'VerticalAlignment', 'top', ...
+             'BackgroundColor', 'k');
+        title('Test piece partially out of view');
+        hold off; drawnow; continue
+    end
+
+    % Fully in view: find the 4-corner shape and run the shape checks
+    hull = s.ConvexHull;                           % corners of the convex hull (x, y)
+    if isequal(hull(1,:), hull(end,:)), hull(end,:) = []; end   % drop the repeated last point
+
+    if size(hull, 1) < 4
+        visboundaries(blob, 'Color', 'r', 'LineWidth', 3);
+        title('Test piece rejected');
+        hold off; drawnow; continue
+    end
+
+    quad    = fitQuad(hull);                       % best 4-corner fit, (x, y) of each corner
+    quadFit = polyarea(quad(:,1), quad(:,2)) / polyarea(hull(:,1), hull(:,2));
+    angles  = cornerAngles(quad);
+
+    % 3. Identified -> solid, 4-sided and with plausible corner angles?
+    isRectangle = s.Solidity > minSolidity && quadFit > minQuadFit && ...
+                  min(angles) > minAngle && max(angles) < maxAngle;
+
+    if isRectangle
+        visboundaries(blob, 'Color', 'g', 'LineWidth', 3);   % detected: green outline
+        title('Test piece detected');
+    else
+        visboundaries(blob, 'Color', 'r', 'LineWidth', 3);   % rejected: red outline
+        title('Test piece rejected');
+    end
+
+    hold off;
+    drawnow;
+end
+
+%% Local functions (dont touch pls) 
+
+function msg = moveDirection(touch)
+% Says which way to move so the whole test piece comes into view. The piece runs
+% off the edges it touches, so move towards those edges. If it runs off opposite
+% edges, it's too big for the frame, so move back.
+    if (touch.left && touch.right) || (touch.top && touch.bottom)
+        msg = 'Move back';
+        return
+    end
+    dirs = {};
+    if touch.left,   dirs{end+1} = 'left';  end
+    if touch.right,  dirs{end+1} = 'right'; end
+    if touch.top,    dirs{end+1} = 'up';    end
+    if touch.bottom, dirs{end+1} = 'down';  end
+    msg = ['Move ' strjoin(dirs, ' and ')];
+end
+
+function q = fitQuad(p)
+% Reduces a convex polygon to 4 corners. It repeatedly removes the corner whose
+% removal loses the least area (the smallest triangle it makes with its neighbours).
+    while size(p, 1) > 4
+        prev = circshift(p, 1);
+        next = circshift(p, -1);
+        triArea = 0.5 * abs((p(:,1) - prev(:,1)) .* (next(:,2) - prev(:,2)) - ...
+                            (next(:,1) - prev(:,1)) .* (p(:,2) - prev(:,2)));
+        [~, i] = min(triArea);
+        p(i, :) = [];
+    end
+    q = p;
+end
+
+function a = cornerAngles(q)
+% Interior angle at each corner of a polygon, in degrees.
+    prev = circshift(q, 1);
+    next = circshift(q, -1);
+    u = prev - q;
+    w = next - q;
+    c = sum(u .* w, 2) ./ (vecnorm(u, 2, 2) .* vecnorm(w, 2, 2));
+    a = acosd(min(max(c, -1), 1));
+end
